@@ -182,7 +182,11 @@ func main() {
 	// Those can arrange for main.main to run in the main thread
 	// by calling runtime.LockOSThread during initialization
 	// to preserve the lock.
-	lockOSThread()
+	if debug.newschedule == 1 {
+
+	} else {
+		lockOSThread()
+	}
 
 	if g.m != &m0 {
 		throw("runtime.main not on m0")
@@ -211,7 +215,11 @@ func main() {
 		}
 	}()
 
-	gcenable()
+	if debug.newschedule == 1 {
+
+	} else {
+		gcenable()
+	}
 
 	main_init_done = make(chan bool)
 	if iscgo {
@@ -244,7 +252,11 @@ func main() {
 	close(main_init_done)
 
 	needUnlock = false
-	unlockOSThread()
+	if debug.newschedule == 1 {
+
+	} else {
+		unlockOSThread()
+	}
 
 	if isarchive || islibrary {
 		// A program compiled with -buildmode=c-archive or c-shared
@@ -845,7 +857,13 @@ func ready(gp *g, traceskip int, next bool) {
 
 	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
 	casgstatus(gp, _Gwaiting, _Grunnable)
-	runqput(_g_.m.p.ptr(), gp, next)
+	if debug.newschedule == 1 {
+		lock(&sched.lock)
+		globrunqput(gp)
+		unlock(&sched.lock)
+	} else {
+		runqput(_g_.m.p.ptr(), gp, next)
+	}
 	wakep()
 	releasem(mp)
 }
@@ -1408,8 +1426,12 @@ func mstart1() {
 	}
 
 	if _g_.m != &m0 {
-		acquirep(_g_.m.nextp.ptr())
-		_g_.m.nextp = 0
+		if debug.newschedule == 1 {
+
+		} else {
+			acquirep(_g_.m.nextp.ptr())
+			_g_.m.nextp = 0
+		}
 	}
 	schedule()
 }
@@ -1844,7 +1866,11 @@ func allocm(_p_ *p, fn func(), id int64) *m {
 	_g_ := getg()
 	acquirem() // disable GC because it can be called from sysmon
 	if _g_.m.p == 0 {
-		acquirep(_p_) // temporarily borrow p for mallocs in this function
+		if debug.newschedule == 1 {
+
+		} else {
+			acquirep(_p_) // temporarily borrow p for mallocs in this function
+		}
 	}
 
 	// Release the free M list. We need to do this somewhere and
@@ -1885,10 +1911,14 @@ func allocm(_p_ *p, fn func(), id int64) *m {
 	}
 	mp.g0.m = mp
 
-	if _p_ == _g_.m.p.ptr() {
-		releasep()
+	if debug.newschedule == 1 {
+
+	} else {
+		if _p_ == _g_.m.p.ptr() {
+			releasep()
+		}
+		releasem(_g_.m)
 	}
-	releasem(_g_.m)
 
 	return mp
 }
@@ -2427,6 +2457,10 @@ func mspinning() {
 // Must not have write barriers because this may be called without a P.
 //go:nowritebarrierrec
 func startm(_p_ *p, spinning bool) {
+	if debug.newschedule == 1 {
+		newStartm()
+		return
+	}
 	// Disable preemption.
 	//
 	// Every owned P must have an owner that will eventually stop it in the
@@ -2501,6 +2535,39 @@ func startm(_p_ *p, spinning bool) {
 	// The caller incremented nmspinning, so set m.spinning in the new M.
 	nmp.spinning = spinning
 	nmp.nextp.set(_p_)
+	notewakeup(&nmp.park)
+	// Ownership transfer of _p_ committed by wakeup. Preemption is now
+	// safe.
+	releasem(mp)
+}
+
+//go:nowritebarrierrec
+func newStartm() {
+	mp := acquirem()
+	lock(&sched.lock)
+	nmp := mget()
+	if nmp == nil {
+		// No M is available, we must drop sched.lock and call newm.
+		// However, we already own a P to assign to the M.
+		//
+		// Once sched.lock is released, another G (e.g., in a syscall),
+		// could find no idle P while checkdead finds a runnable G but
+		// no running M's because this new M hasn't started yet, thus
+		// throwing in an apparent deadlock.
+		//
+		// Avoid this situation by pre-allocating the ID for the new M,
+		// thus marking it as 'running' before we drop sched.lock. This
+		// new M will eventually run the scheduler to execute any
+		// queued G's.
+		id := mReserveID()
+		unlock(&sched.lock)
+		newm(nil, nil, id)
+		// Ownership transfer of _p_ committed by start in newm.
+		// Preemption is now safe.
+		releasem(mp)
+		return
+	}
+	unlock(&sched.lock)
 	notewakeup(&nmp.park)
 	// Ownership transfer of _p_ committed by wakeup. Preemption is now
 	// safe.
@@ -2678,8 +2745,12 @@ func execute(gp *g, inheritTime bool) {
 	gp.waitsince = 0
 	gp.preempt = false
 	gp.stackguard0 = gp.stack.lo + _StackGuard
-	if !inheritTime {
-		_g_.m.p.ptr().schedtick++
+	if debug.newschedule == 1 {
+
+	} else {
+		if !inheritTime {
+			_g_.m.p.ptr().schedtick++
+		}
 	}
 
 	// Check whether the profiler needs to be turned on or off.
@@ -2697,6 +2768,19 @@ func execute(gp *g, inheritTime bool) {
 		traceGoStart()
 	}
 
+	gogo(&gp.sched)
+}
+
+//go:yeswritebarrierrec
+func newEexecute(gp *g) {
+	_g_ := getg()
+
+	// Assign gp.m before entering _Grunning so running Gs have an
+	// M.
+	_g_.m.curg = gp
+	gp.m = _g_.m
+	casgstatus(gp, _Grunnable, _Grunning)
+	gp.stackguard0 = gp.stack.lo + _StackGuard
 	gogo(&gp.sched)
 }
 
@@ -3289,6 +3373,25 @@ func injectglist(glist *gList) {
 // One round of scheduler: find a runnable goroutine and execute it.
 // Never returns.
 func schedule() {
+	if debug.newschedule == 1 {
+		println("enter newschedule")
+		_g_ := getg()
+		if _g_.m.p != 0 {
+			println("m have p")
+		}
+		var gp *g
+		for gp == nil {
+			// Check the global runnable queue once in a while to ensure fairness.
+			// Otherwise two goroutines can completely occupy the local runqueue
+			// by constantly respawning each other.
+			lock(&sched.lock)
+			gp = globrunqget(_g_.m.p.ptr(), 1)
+			unlock(&sched.lock)
+		}
+		println("go to execute goroutine", gp.goid)
+		newEexecute(gp)
+		return
+	}
 	_g_ := getg()
 
 	if _g_.m.locks != 0 {
@@ -3632,7 +3735,9 @@ func goexit1() {
 // goexit continuation on g0.
 func goexit0(gp *g) {
 	_g_ := getg()
-
+	if debug.newschedule == 1 {
+		println("goroutine execute done", gp.goid)
+	}
 	casgstatus(gp, _Grunning, _Gdead)
 	if isSystemGoroutine(gp, false) {
 		atomic.Xadd(&sched.ngsys, -1)
@@ -3672,7 +3777,11 @@ func goexit0(gp *g) {
 		print("invalid m->lockedInt = ", _g_.m.lockedInt, "\n")
 		throw("internal lockOSThread error")
 	}
-	gfput(_g_.m.p.ptr(), gp)
+	if debug.newschedule == 1 {
+
+	} else {
+		gfput(_g_.m.p.ptr(), gp)
+	}
 	if locked {
 		// The goroutine may have locked this thread because
 		// it put it in an unusual kernel state. Kill it
@@ -4253,9 +4362,14 @@ func newproc(siz int32, fn *funcval) {
 	pc := getcallerpc()
 	systemstack(func() {
 		newg := newproc1(fn, argp, siz, gp, pc)
-
-		_p_ := getg().m.p.ptr()
-		runqput(_p_, newg, true)
+		if debug.newschedule == 1 {
+			lock(&sched.lock)
+			globrunqput(newg)
+			unlock(&sched.lock)
+		} else {
+			_p_ := getg().m.p.ptr()
+			runqput(_p_, newg, true)
+		}
 
 		if mainStarted {
 			wakep()
@@ -4300,7 +4414,12 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 	}
 
 	_p_ := _g_.m.p.ptr()
-	newg := gfget(_p_)
+	var newg *g = nil
+	if debug.newschedule == 1 {
+
+	} else {
+		newg = gfget(_p_)
+	}
 	if newg == nil {
 		newg = malg(_StackMin)
 		casgstatus(newg, _Gidle, _Gdead)
@@ -4365,16 +4484,20 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 	}
 	casgstatus(newg, _Gdead, _Grunnable)
 
-	if _p_.goidcache == _p_.goidcacheend {
-		// Sched.goidgen is the last allocated id,
-		// this batch must be [sched.goidgen+1, sched.goidgen+GoidCacheBatch].
-		// At startup sched.goidgen=0, so main goroutine receives goid=1.
-		_p_.goidcache = atomic.Xadd64(&sched.goidgen, _GoidCacheBatch)
-		_p_.goidcache -= _GoidCacheBatch - 1
-		_p_.goidcacheend = _p_.goidcache + _GoidCacheBatch
+	if debug.newschedule == 1 {
+		newg.goid = atomic.Xaddint64(&sched.goidCount, 1) - 1
+	} else {
+		if _p_.goidcache == _p_.goidcacheend {
+			// Sched.goidgen is the last allocated id,
+			// this batch must be [sched.goidgen+1, sched.goidgen+GoidCacheBatch].
+			// At startup sched.goidgen=0, so main goroutine receives goid=1.
+			_p_.goidcache = atomic.Xadd64(&sched.goidgen, _GoidCacheBatch)
+			_p_.goidcache -= _GoidCacheBatch - 1
+			_p_.goidcacheend = _p_.goidcache + _GoidCacheBatch
+		}
+		newg.goid = int64(_p_.goidcache)
+		_p_.goidcache++
 	}
-	newg.goid = int64(_p_.goidcache)
-	_p_.goidcache++
 	if raceenabled {
 		newg.racectx = racegostart(callerpc)
 	}
@@ -5068,17 +5191,25 @@ func procresize(nprocs int32) *p {
 			_g_.m.p.ptr().m = 0
 		}
 		_g_.m.p = 0
-		p := allp[0]
-		p.m = 0
-		p.status = _Pidle
-		acquirep(p)
+		if debug.newschedule == 1 {
+
+		} else {
+			p := allp[0]
+			p.m = 0
+			p.status = _Pidle
+			acquirep(p)
+		}
 		if trace.enabled {
 			traceGoStart()
 		}
 	}
 
 	// g.m.p is now set, so we no longer need mcache0 for bootstrapping.
-	mcache0 = nil
+	if debug.newschedule == 1 {
+
+	} else {
+		mcache0 = nil
+	}
 
 	// release resources from unused P's
 	for i := nprocs; i < old; i++ {
@@ -5111,7 +5242,11 @@ func procresize(nprocs int32) *p {
 			runnablePs = p
 		}
 	}
-	stealOrder.reset(uint32(nprocs))
+	if debug.newschedule == 1 {
+
+	} else {
+		stealOrder.reset(uint32(nprocs))
+	}
 	var int32p *int32 = &gomaxprocs // make compiler check that gomaxprocs is an int32
 	atomic.Store((*uint32)(unsafe.Pointer(int32p)), uint32(nprocs))
 	return runnablePs
