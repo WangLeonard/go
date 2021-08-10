@@ -839,6 +839,7 @@ type schedt struct {
 	// timeToRun is protected by sched.lock.
 	timeToRun timeHistogram
 	goidCount int64
+	mCount    int64
 }
 
 // Values for the flags field of a sigTabT.

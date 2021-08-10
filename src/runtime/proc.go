@@ -2458,7 +2458,9 @@ func mspinning() {
 //go:nowritebarrierrec
 func startm(_p_ *p, spinning bool) {
 	if debug.newschedule == 1 {
-		newStartm()
+		if atomic.Loadint64(&sched.mCount) < int64(ncpu) && atomic.Xaddint64(&sched.mCount, 1) < int64(ncpu) {
+			newStartm()
+		}
 		return
 	}
 	// Disable preemption.
@@ -2641,12 +2643,16 @@ func handoffp(_p_ *p) {
 // Tries to add one more P to execute G's.
 // Called when a G is made runnable (newproc, ready).
 func wakep() {
-	if atomic.Load(&sched.npidle) == 0 {
-		return
-	}
-	// be conservative about spinning threads
-	if atomic.Load(&sched.nmspinning) != 0 || !atomic.Cas(&sched.nmspinning, 0, 1) {
-		return
+	if debug.newschedule == 1 {
+
+	} else {
+		if atomic.Load(&sched.npidle) == 0 {
+			return
+		}
+		// be conservative about spinning threads
+		if atomic.Load(&sched.nmspinning) != 0 || !atomic.Cas(&sched.nmspinning, 0, 1) {
+			return
+		}
 	}
 	startm(nil, true)
 }
@@ -3374,8 +3380,8 @@ func injectglist(glist *gList) {
 // Never returns.
 func schedule() {
 	if debug.newschedule == 1 {
-		println("enter newschedule")
 		_g_ := getg()
+		println("enter newschedule,m id:", _g_.m.id)
 		if _g_.m.p != 0 {
 			println("m have p")
 		}
