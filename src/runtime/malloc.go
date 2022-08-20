@@ -903,12 +903,12 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, shouldhelpgc bo
 	return
 }
 
-type typeData [68]map[string]uint64
+type typeData [_NumSizeClasses << 1]map[string]uint64
 
 func PrintMallocInfo() {
-	mergeMap := [68]map[string]uint64{}
+	mergeMap := [_NumSizeClasses << 1]map[string]uint64{}
 	for i := 0; i < len(mergeMap); i++ {
-		mergeMap[i] = make(map[string]uint64, 100)
+		mergeMap[i] = make(map[string]uint64, 100) // maybe need large enough.
 	}
 	stopTheWorld("PrintMallocInfo")
 	for _, p := range allp {
@@ -920,9 +920,18 @@ func PrintMallocInfo() {
 	}
 	startTheWorld()
 	for i := 0; i < len(mergeMap); i++ {
-		println("sizclass:", i)
+		sc := spanClass(i)
+		nosacn := sc.noscan()
+		if i%2 == 0 {
+			println("size:", class_to_size[sc.sizeclass()])
+		}
+		if nosacn {
+			println("\t", "noscan", "sizclass:", i)
+		} else {
+			println("\t", "scan", "  sizclass:", i)
+		}
 		for k, v := range mergeMap[i] {
-			println("\t", k, v)
+			println("\t\t", k, v)
 		}
 	}
 }
@@ -992,16 +1001,18 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 
-	if debug.malloccount > 0 && memstats.enablegc && size <= maxSmallSize && typ != nil && typ.ptrdata != 0 && typ.name() != "" {
+	if debug.malloccount > 0 && memstats.enablegc && size <= maxSmallSize && typ != nil && typ.name() != "" {
+		noscan := typ.ptrdata == 0
 		var sizeclass uint8
 		if size <= smallSizeMax-8 {
 			sizeclass = size_to_class8[divRoundUp(size, smallSizeDiv)]
 		} else {
 			sizeclass = size_to_class128[divRoundUp(size-smallSizeMax, largeSizeDiv)]
 		}
+		spc := makeSpanClass(sizeclass, noscan)
 		_p_ := mp.p.ptr()
-		if _p_.mallocCount[sizeclass] != nil {
-			_p_.mallocCount[sizeclass][typ.pkgpath()+"."+typ.name()]++
+		if _p_.mallocCount[spc] != nil {
+			_p_.mallocCount[spc][typ.pkgpath()+"."+typ.name()]++
 		}
 	}
 
