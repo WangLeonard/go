@@ -323,6 +323,7 @@ var debug struct {
 	allocfreetrace int32
 	inittrace      int32
 	sbrk           int32
+	malloccount    int32
 }
 
 var dbgvars = []dbgVar{
@@ -344,12 +345,14 @@ var dbgvars = []dbgVar{
 	{"tracebackancestors", &debug.tracebackancestors},
 	{"asyncpreemptoff", &debug.asyncpreemptoff},
 	{"inittrace", &debug.inittrace},
+	{"malloccount", &debug.malloccount},
 }
 
 func parsedebugvars() {
 	// defaults
 	debug.cgocheck = 1
 	debug.invalidptr = 1
+	debug.malloccount = 1
 	if GOOS == "linux" {
 		// On Linux, MADV_FREE is faster than MADV_DONTNEED,
 		// but doesn't affect many of the statistics that

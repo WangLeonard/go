@@ -4877,6 +4877,11 @@ func (pp *p) init(id int32) {
 			pp.mcache = allocmcache()
 		}
 	}
+
+	for i := 0; i < len(pp.mallocCount); i++ {
+		pp.mallocCount[i] = make(map[string]uint64, 10)
+	}
+
 	if raceenabled && pp.raceprocctx == 0 {
 		if id == 0 {
 			pp.raceprocctx = raceprocctx0

@@ -903,6 +903,30 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, shouldhelpgc bo
 	return
 }
 
+type typeData [68]map[string]uint64
+
+func PrintMallocInfo() {
+	mergeMap := [68]map[string]uint64{}
+	for i := 0; i < len(mergeMap); i++ {
+		mergeMap[i] = make(map[string]uint64, 100)
+	}
+	stopTheWorld("PrintMallocInfo")
+	for _, p := range allp {
+		for j := 0; j < len(p.mallocCount); j++ {
+			for k, v := range p.mallocCount[j] {
+				mergeMap[j][k] += v
+			}
+		}
+	}
+	startTheWorld()
+	for i := 0; i < len(mergeMap); i++ {
+		println("sizclass:", i)
+		for k, v := range mergeMap[i] {
+			println("\t", k, v)
+		}
+	}
+}
+
 // Allocate an object of size bytes.
 // Small objects are allocated from the per-P cache's free lists.
 // Large objects (> 32 kB) are allocated straight from the heap.
@@ -910,7 +934,6 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	if gcphase == _GCmarktermination {
 		throw("mallocgc called with gcphase == _GCmarktermination")
 	}
-
 	if size == 0 {
 		return unsafe.Pointer(&zerobase)
 	}
@@ -968,6 +991,20 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
+
+	if debug.malloccount > 0 && memstats.enablegc && size <= maxSmallSize && typ != nil && typ.ptrdata != 0 && typ.name() != "" {
+		var sizeclass uint8
+		if size <= smallSizeMax-8 {
+			sizeclass = size_to_class8[divRoundUp(size, smallSizeDiv)]
+		} else {
+			sizeclass = size_to_class128[divRoundUp(size-smallSizeMax, largeSizeDiv)]
+		}
+		_p_ := mp.p.ptr()
+		if _p_.mallocCount[sizeclass] != nil {
+			_p_.mallocCount[sizeclass][typ.pkgpath()+"."+typ.name()]++
+		}
+	}
+
 	if mp.mallocing != 0 {
 		throw("malloc deadlock")
 	}
