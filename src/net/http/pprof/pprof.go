@@ -83,6 +83,36 @@ func init() {
 	http.HandleFunc("/debug/pprof/profile", Profile)
 	http.HandleFunc("/debug/pprof/symbol", Symbol)
 	http.HandleFunc("/debug/pprof/trace", Trace)
+	http.HandleFunc("/debug/pprof/test", GoroutineProfile)
+}
+
+// Profile responds with the pprof-formatted cpu profile.
+// Profiling lasts for duration specified in seconds GET parameter, or for 30 seconds if not specified.
+// The package initialization registers it as /debug/pprof/profile.
+func GoroutineProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	sec, err := strconv.ParseInt(r.FormValue("seconds"), 10, 64)
+	if sec <= 0 || err != nil {
+		sec = 30
+	}
+
+	if durationExceedsWriteTimeout(r, float64(sec)) {
+		serveError(w, http.StatusBadRequest, "profile duration exceeds server's WriteTimeout")
+		return
+	}
+
+	// Set Content Type assuming StartCPUProfile will work,
+	// because if it does it starts writing.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="profile"`)
+	if err := pprof.StartGoroutineProfile(w); err != nil {
+		// StartCPUProfile failed, so no writes yet.
+		serveError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Could not enable CPU profiling: %s", err))
+		return
+	}
+	sleep(r, time.Duration(sec)*time.Second)
+	pprof.StopGoroutineProfile()
 }
 
 // Cmdline responds with the running program's

@@ -733,6 +733,53 @@ func writeRuntimeProfile(w io.Writer, debug int, name string, fetch func([]runti
 	return printCountProfile(w, debug, name, &runtimeProfile{p, labels})
 }
 
+func getRuntimeProfile(fetch func([]runtime.StackRecord, []unsafe.Pointer) (int, bool)) *runtimeProfile {
+	// Find out how many records there are (fetch(nil)),
+	// allocate that many records, and get the data.
+	// There's a race—more records might be added between
+	// the two calls—so allocate a few extra records for safety
+	// and also try again if we're very unlucky.
+	// The loop should only execute one iteration in the common case.
+	var p []runtime.StackRecord
+	var labels []unsafe.Pointer
+	n, ok := fetch(nil, nil)
+	for {
+		// Allocate room for a slightly bigger profile,
+		// in case a few more entries have been added
+		// since the call to ThreadProfile.
+		p = make([]runtime.StackRecord, n+10)
+		labels = make([]unsafe.Pointer, n+10)
+		n, ok = fetch(p, labels)
+		if ok {
+			p = p[0:n]
+			break
+		}
+		// Profile grew; try again.
+	}
+
+	return &runtimeProfile{p, labels}
+}
+
+func mergeGoroutineProfile(profiles []*runtimeProfile) countProfile {
+	count := 0
+	for _, p := range profiles {
+		count += p.Len()
+	}
+	record := make([]runtime.StackRecord, 0, count)
+	labels := make([]unsafe.Pointer, 0, count)
+	for _, p := range profiles {
+		n := p.Len()
+		for i := 0; i < n; i++ {
+			record = append(record, p.stk[i])
+			labels = append(labels, p.labels[i])
+		}
+	}
+	return &runtimeProfile{
+		stk:    record,
+		labels: labels,
+	}
+}
+
 type runtimeProfile struct {
 	stk    []runtime.StackRecord
 	labels []unsafe.Pointer
@@ -784,6 +831,49 @@ func StartCPUProfile(w io.Writer) error {
 	runtime.SetCPUProfileRate(hz)
 	go profileWriter(w)
 	return nil
+}
+
+var (
+	startTime time.Time
+	stopCh    chan struct{}
+	rprofiles []*runtimeProfile
+	gprofile  io.Writer
+)
+
+func StartGoroutineProfile(w io.Writer) error {
+	startTime = time.Now()
+	gprofile = w
+	// Go's CPU profiler uses 100hz, but 99hz might be less likely to result in
+	// accidental synchronization with the program we're profiling.
+	const hz = 99
+	ticker := time.NewTicker(time.Second / hz)
+	stopCh = make(chan struct{})
+
+	go func() {
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				rps := getRuntimeProfile(runtime_goroutineProfileWithLabels)
+				rprofiles = append(rprofiles, rps)
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// StopCPUProfile stops the current CPU profile, if any.
+// StopCPUProfile only returns after all the writes for the
+// profile have completed.
+func StopGoroutineProfile() error {
+	stopCh <- struct{}{}
+	//endTime := time.Now()
+	//profile.Ignore(prof.SelfFrames()...)
+	profileData := mergeGoroutineProfile(rprofiles)
+	return printCountProfile(gprofile, 0, "goroutine", profileData)
 }
 
 // readProfile, provided by the runtime, returns the next chunk of
